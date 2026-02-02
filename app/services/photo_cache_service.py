@@ -1,91 +1,73 @@
-from __future__ import annotations
+# app/services/photo_cache_service.py
+"""Кэш Telegram file_id для фото товаров.
 
-import sqlite3
-import time
-import asyncio
-from pathlib import Path
-from typing import Optional, Dict
-
-# Используем ту же БД, что и каталог (bot_data.db рядом с корнем проекта)
-DB_PATH = Path(__file__).resolve().parents[2] / "bot_data.db"
-
-PHOTO_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS photo_cache (
-    url TEXT PRIMARY KEY,
-    file_id TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);
+На сервере (Bothost) важно хранить кэш в персистентной папке.
+Путь задаётся через переменную окружения PHOTO_CACHE_PATH.
+Рекомендуемое значение: /app/data/photo_cache.json
 """
 
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Dict, Optional
+
+
+def _default_cache_path() -> Path:
+    # дефолт рядом с кодом (локальная разработка)
+    return Path(__file__).resolve().parent.parent.parent / "photo_cache.json"
+
+
+def get_cache_path() -> Path:
+    env_path = os.getenv("PHOTO_CACHE_PATH")
+    if env_path:
+        p = Path(env_path)
+        return p if p.is_absolute() else (Path.cwd() / p).resolve()
+    return _default_cache_path()
+
+
 class PhotoCacheService:
-    """Кэш соответствия url -> telegram file_id.
+    def __init__(self) -> None:
+        self.path: Path = get_cache_path()
+        self._cache: Dict[str, str] = {}
+        self._loaded: bool = False
 
-    - Быстрый слой: in-memory dict
-    - Долговременный слой: SQLite (bot_data.db)
-    """
-
-    def __init__(self):
-        self._mem: Dict[str, str] = {}
-        self._lock = asyncio.Lock()
-        self._inited = False
-
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def init_sync(self) -> None:
-        conn = self._conn()
-        try:
-            cur = conn.cursor()
-            cur.execute(PHOTO_TABLE_SQL)
-            conn.commit()
-        finally:
-            conn.close()
-
-        conn = self._conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT url, file_id FROM photo_cache")
-            for row in cur.fetchall():
-                self._mem[row["url"]] = row["file_id"]
-        finally:
-            conn.close()
-
-        self._inited = True
-
-    async def init(self) -> None:
-        # не блокируем event loop на старте
-        await asyncio.to_thread(self.init_sync)
-
-    async def get(self, url: str) -> Optional[str]:
-        if not url:
-            return None
-        return self._mem.get(url)
-
-    async def set(self, url: str, file_id: str) -> None:
-        if not url or not file_id:
+    def load(self) -> None:
+        if self._loaded:
             return
-        self._mem[url] = file_id
-        ts = int(time.time())
+        self._loaded = True
 
-        def _write():
-            conn = self._conn()
+        # гарантируем папку
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        if not self.path.exists():
+            # создаём пустой кэш
             try:
-                cur = conn.cursor()
-                cur.execute(PHOTO_TABLE_SQL)
-                cur.execute(
-                    "INSERT INTO photo_cache(url, file_id, updated_at) VALUES(?,?,?) "
-                    "ON CONFLICT(url) DO UPDATE SET file_id=excluded.file_id, updated_at=excluded.updated_at",
-                    (url, file_id, ts),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+                self.path.write_text("{}", encoding="utf-8")
+            except Exception:
+                return
 
-        await asyncio.to_thread(_write)
+        try:
+            raw = self.path.read_text(encoding="utf-8").strip() or "{}"
+            self._cache = json.loads(raw)
+            if not isinstance(self._cache, dict):
+                self._cache = {}
+        except Exception:
+            self._cache = {}
 
-    async def get_or_lock(self):
-        return self._lock
+    def get(self, key: str) -> Optional[str]:
+        self.load()
+        return self._cache.get(key)
 
-photo_cache_service = PhotoCacheService()
+    def set(self, key: str, file_id: str) -> None:
+        self.load()
+        self._cache[key] = file_id
+        try:
+            self.path.write_text(json.dumps(self._cache, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            # не роняем бота из-за записи кэша
+            pass
