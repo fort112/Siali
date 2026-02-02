@@ -7,15 +7,27 @@ from config import ADMIN_IDS
 
 
 async def notify_admins_catalog_health(bot):
-    """
-    Разовая проверка состояния каталога и отправка уведомления администраторам,
-    если нужно (после 5 и 10 дней).
-    """
+    """Отправляет админу health-уведомление (если нужно). Не роняет процесс."""
     try:
         health = get_catalog_health()
+        # health может быть dict
+        msg = None
+        if isinstance(health, dict):
+            msg = health.get("message_to_admin")
+        else:
+            msg = getattr(health, "message_to_admin", None)
+
+        if not msg:
+            return
+
+        if not ADMIN_CHAT_ID:
+            logging.warning("ADMIN_CHAT_ID не задан — уведомление о здоровье каталога пропущено.")
+            return
+
+        await bot.send_message(ADMIN_CHAT_ID, msg)
     except Exception as e:
-        print(f"❌ Ошибка проверки состояния каталога: {e}")
-        return
+        logging.exception(f"Ошибка notify_admins_catalog_health: {e}")
+
 
     if not health.message_to_admin:
         print(f"✅ Каталог OK (age_days={health.age_days}, status={health.status})")
@@ -29,11 +41,16 @@ async def notify_admins_catalog_health(bot):
             print(f"❌ Ошибка отправки админу {admin_id}: {e}")
 
 
-async def catalog_health_notifier_loop(bot):
-    """
-    Раз в сутки проверяет состояние каталога и напоминает админу.
-    """
-    await asyncio.sleep(10)   # задержка после старта
+async def catalog_health_notifier_loop():
+    """Фоновая проверка каталога. Никогда не падает наружу."""
+    while True:
+        try:
+            await asyncio.sleep(60 * 30)  # каждые 30 минут
+            await notify_admins_catalog_health(bot)
+        except Exception as e:
+            logging.exception(f"Ошибка catalog_health_notifier_loop: {e}")
+            await asyncio.sleep(60)
+
 
     while True:
         await notify_admins_catalog_health(bot)
