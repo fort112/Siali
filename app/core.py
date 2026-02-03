@@ -4,6 +4,26 @@ import asyncio
 # --- Slider concurrency guards (anti double-render) ---
 _slider_locks: dict[int, asyncio.Lock] = {}
 
+
+# --- Catalog photo warmup (admin) ---
+_warmup_lock: asyncio.Lock = asyncio.Lock()
+
+def _to_drive_uc_url(src: str) -> str:
+    # local import to avoid dependency on import order
+    import re as _re
+    s = (src or "").strip()
+    if not s:
+        return ""
+    if s.startswith(("http://", "https://")):
+        return s
+    if _re.match(r'^[a-zA-Z0-9_-]{20,200}$', s):
+        return f"https://drive.google.com/uc?export=view&id={s}"
+    return s
+    if _DRIVE_ID_RE.match(s):
+        return f"https://drive.google.com/uc?export=view&id={s}"
+    return s
+
+
 import logging
 import re
 import time
@@ -7909,11 +7929,91 @@ async def cmd_admin(message: Message, state: FSMContext):
             [KeyboardButton(text='⚙️ Настройки уведомлений')],
             [KeyboardButton(text='🎁 Обновить промо')],
             [KeyboardButton(text='🔄 Обновить каталог')],
+            [KeyboardButton(text='🔥 Прогреть фото')],
             [KeyboardButton(text='🔙 Главное меню')],
         ],
     )
     await message.answer('🛠️ *Админ-панель*', reply_markup=kb)
     await state.set_state(AdminPanel.MainMenu)
+
+
+@dp.message(AdminPanel.MainMenu, F.text == '🔥 Прогреть фото')
+@retry_on_network_error()
+async def admin_warmup_photos(message: Message):
+    if message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer('❌ Нет доступа.')
+        return
+
+    if _warmup_lock.locked():
+        await message.answer('⏳ Прогрев уже выполняется…')
+        return
+
+    async with _warmup_lock:
+        progress = await message.answer('🔥 Прогрев фото: готовлю список…')
+
+        try:
+            items = query_all_products() or []
+        except Exception as e:
+            await progress.edit_text(f'❌ Не удалось прочитать товары из БД: {e}')
+            return
+
+        sources = []
+        seen = set()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            for k in ('Изображение', 'Изображение модели'):
+                src = it.get(k)
+                if not isinstance(src, str):
+                    continue
+                src = src.strip()
+                if not src:
+                    continue
+                src = _to_drive_uc_url(src)
+                if src and src not in seen:
+                    seen.add(src)
+                    sources.append(src)
+
+        if not sources:
+            await progress.edit_text('⚠️ В каталоге не найдено источников фото (поля "Изображение" пустые).')
+            return
+
+        await progress.edit_text(f'🔥 Прогрев фото: найдено {len(sources)} изображений. Начинаю…')
+
+        ok = 0
+        fail = 0
+
+        for i, src in enumerate(sources, start=1):
+            try:
+                file_id = await ensure_photo_in_channel(src, trace_id='warmup')
+                if file_id:
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception:
+                fail += 1
+
+            if i == 1 or i % 20 == 0 or i == len(sources):
+                try:
+                    await progress.edit_text(
+                        '🔥 Прогрев фото…\n'
+                        f'Готово: {i}/{len(sources)}\n'
+                        f'✅ Успешно: {ok}\n'
+                        f'❌ Ошибки: {fail}'
+                    )
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.05)
+
+        await progress.edit_text(
+            '✅ Прогрев завершён!\n'
+            f'Всего: {len(sources)}\n'
+            f'✅ Успешно: {ok}\n'
+            f'❌ Ошибки: {fail}\n\n'
+            'Теперь слайдеры и корзина будут открываться быстрее.'
+        )
+
 
 @dp.message(AdminPanel.MainMenu, F.text == '📊 Статистика бота')
 @retry_on_network_error()
