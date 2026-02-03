@@ -47,7 +47,7 @@ MAX_CONCURRENT_SEND = 5
 # --- Channel photo cache (to speed up sliders) ---
 PHOTO_STORAGE_CHANNEL_ID = -1003692314035  # @Sklad_photo
 PHOTO_STORAGE_CHANNEL_TITLE = 'Sklad_photo'
-PHOTO_CACHE_PATH = os.getenv('PHOTO_CACHE_PATH', os.path.join(os.path.dirname(__file__), 'photo_cache.json'))
+PHOTO_CACHE_PATH = os.getenv('PHOTO_CACHE_PATH', '/app/data/photo_cache.json')
 _photo_cache_lock = asyncio.Lock()
 
 
